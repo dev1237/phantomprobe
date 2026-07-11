@@ -39,7 +39,25 @@ wherever you run it. Point it at any target list, from any vantage in the world.
 | `--secs` | `s` | `20` | Duration (seconds) of the dense IP-ID capture used to count injecting boxes. |
 | `--help` | — | — | Print usage and exit. |
 
-Anything except `http` passed to `--protocol` is treated as `https`.
+Anything except `http` passed to `--protocol` is treated as `https` — so only pass one of those
+two (see supported channels below).
+
+### Supported channels (and roadmap)
+
+This C binary currently implements **two channels: HTTP (`Host:` header, tcp/80) and HTTPS
+(TLS `SNI`, tcp/443)**. That is what `--protocol` accepts.
+
+**DNS (qname, udp/53) and STUN (Allocate, udp/3478) are not in this binary yet.** They were
+measured in the original UAE study with separate reference tools; porting them into
+`phantomprobe` as `--protocol dns|stun` is planned future work. Until then, do **not** pass
+`dns`/`stun` to `--protocol` — the parser would silently fall back to `https`.
+
+| Channel | Trigger | In this C tool? |
+|---------|---------|-----------------|
+| HTTP  | censored `Host:` header (tcp/80)      | ✅ yes |
+| HTTPS | censored TLS `SNI` (tcp/443)          | ✅ yes |
+| DNS   | censored qname (udp/53)               | ⏳ planned |
+| STUN  | STUN `Allocate` (udp/3478)            | ⏳ planned |
 
 ### Examples
 
