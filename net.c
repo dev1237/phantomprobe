@@ -69,6 +69,55 @@ int build_http_get(const char *host, unsigned char *out, int cap) {
         "Accept: */*\r\nConnection: keep-alive\r\n\r\n", host);
 }
 
+/* DNS A/IN query for qname, recursion desired. Header(12) + QNAME + QTYPE(2) + QCLASS(2). */
+int build_dns_query(const char *qname, unsigned char *out, int cap) {
+    int qlen = (int)strlen(qname);
+    if (qlen > 250 || cap < qlen + 18) return -1;
+    int o = 0;
+    be16(&out[o], rand() & 0xffff); o += 2;   /* transaction ID */
+    be16(&out[o], 0x0100); o += 2;            /* flags: standard query, RD=1 */
+    be16(&out[o], 1); o += 2;                 /* QDCOUNT = 1 */
+    be16(&out[o], 0); o += 2;                 /* ANCOUNT   */
+    be16(&out[o], 0); o += 2;                 /* NSCOUNT   */
+    be16(&out[o], 0); o += 2;                 /* ARCOUNT   */
+    /* QNAME as length-prefixed labels */
+    const char *p = qname;
+    while (*p) {
+        const char *dot = strchr(p, '.');
+        int l = dot ? (int)(dot - p) : (int)strlen(p);
+        if (l <= 0 || l > 63) return -1;
+        out[o++] = (unsigned char)l;
+        memcpy(&out[o], p, l); o += l;
+        if (!dot) break;
+        p = dot + 1;
+    }
+    out[o++] = 0x00;                          /* root label */
+    be16(&out[o], 1); o += 2;                 /* QTYPE = A   */
+    be16(&out[o], 1); o += 2;                 /* QCLASS = IN */
+    return o;
+}
+
+/* STUN message. allocate=1 -> TURN Allocate Request (0x0003) with REQUESTED-TRANSPORT=UDP
+ * (this is what call/relay censors block); allocate=0 -> plain Binding Request (0x0001),
+ * the benign control. RFC 5389/5766, magic cookie 0x2112A442, 12-byte transaction id. */
+int build_stun(int allocate, unsigned char *out, int cap) {
+    if (cap < 32) return -1;
+    int o = 0;
+    be16(&out[o], allocate ? 0x0003 : 0x0001); o += 2;   /* message type */
+    int lenpos = o; be16(&out[o], 0); o += 2;            /* message length (fill below) */
+    out[o++] = 0x21; out[o++] = 0x12; out[o++] = 0xA4; out[o++] = 0x42;  /* magic cookie */
+    for (int i = 0; i < 12; i++) out[o++] = rand() & 0xff;               /* transaction id */
+    int attrs = 0;
+    if (allocate) {                                      /* REQUESTED-TRANSPORT (0x0019), len 4 */
+        be16(&out[o], 0x0019); o += 2;
+        be16(&out[o], 0x0004); o += 2;
+        out[o++] = 17; out[o++] = 0; out[o++] = 0; out[o++] = 0;  /* protocol 17 = UDP + RFFU */
+        attrs = 8;
+    }
+    be16(&out[lenpos], attrs);                           /* message length = attribute bytes */
+    return o;
+}
+
 /* connect with a wall-clock timeout, optionally bound to a fixed local port (sport>0)
  * so the flow hashes onto the same ECMP path as our raw probes (Paris consistency).
  * returns fd>=0, or -2 timeout, -3 refused, -1 error. */
@@ -163,4 +212,63 @@ outcome_t http_probe(const char *ip, const char *host, double timeout) {
     if (e == ECONNRESET) return O_RST;
     if (e == EAGAIN || e == EWOULDBLOCK) return O_TIMEOUT;
     return O_ERR;
+}
+
+/* one UDP request/response with a wall-clock recv timeout. connect() so we get
+ * ECONNREFUSED (ICMP port-unreachable) as a distinct signal from a silent drop. */
+static outcome_t udp_query(const char *ip, int port, const unsigned char *pl, int plen, double timeout) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return O_ERR;
+    struct sockaddr_in sa; memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET; sa.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1) { close(fd); return O_ERR; }
+    struct timeval rt; rt.tv_sec = (int)timeout; rt.tv_usec = (int)((timeout - (int)timeout) * 1e6);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof rt);
+    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) { close(fd); return O_ERR; }
+    if (send(fd, pl, plen, 0) < 0) { int e = errno; close(fd); return e == ECONNREFUSED ? O_REFUSED : O_ERR; }
+    unsigned char resp[1500];
+    ssize_t r = recv(fd, resp, sizeof resp, 0);
+    int e = errno; close(fd);
+    if (r > 0) return O_ALLOW;                           /* a reply came back => reached the server */
+    if (e == ECONNREFUSED) return O_REFUSED;             /* ICMP port unreachable */
+    if (e == EAGAIN || e == EWOULDBLOCK) return O_TIMEOUT;   /* silent drop / no answer */
+    return O_ERR;
+}
+
+/* DNS: reply (any) => ALLOW; silence => TIMEOUT (drop). NOTE: a forged-answer (poisoning)
+ * censor also yields a reply, so this detects drop-based DNS censorship via the qname
+ * differential; separating forged-answer vs drop is a documented next step (see README). */
+outcome_t dns_probe(const char *ip, const char *qname, double timeout) {
+    unsigned char q[600]; int n = build_dns_query(qname, q, sizeof q);
+    if (n < 0) return O_ERR;
+    return udp_query(ip, 53, q, n, timeout);
+}
+
+/* STUN: allocate=1 sends a TURN Allocate (the censored, call-relay request); allocate=0
+ * a benign Binding. A STUN/TURN server answers both (Allocate -> 401 needs-auth, still a
+ * reply => ALLOW); a censor drops the Allocate => TIMEOUT. */
+outcome_t stun_probe(const char *ip, int allocate, double timeout) {
+    unsigned char s[64]; int n = build_stun(allocate, s, sizeof s);
+    if (n < 0) return O_ERR;
+    return udp_query(ip, 3478, s, n, timeout);
+}
+
+const char *proto_name(proto_t p) {
+    switch (p) { case PROTO_HTTP: return "http"; case PROTO_HTTPS: return "https";
+                 case PROTO_DNS: return "dns"; default: return "stun"; }
+}
+int proto_port(proto_t p) {
+    switch (p) { case PROTO_HTTP: return 80; case PROTO_HTTPS: return 443;
+                 case PROTO_DNS: return 53; default: return 3478; }
+}
+int proto_is_udp(proto_t p)    { return p == PROTO_DNS || p == PROTO_STUN; }
+int proto_is_tcprst(proto_t p) { return p == PROTO_HTTP || p == PROTO_HTTPS; }
+
+outcome_t proto_probe(proto_t p, const char *ip, const char *name, int is_trigger, double timeout) {
+    switch (p) {
+        case PROTO_HTTP:  return http_probe(ip, name, timeout);
+        case PROTO_HTTPS: return https_probe(ip, name, timeout);
+        case PROTO_DNS:   return dns_probe(ip, name, timeout);
+        default:          return stun_probe(ip, is_trigger, timeout);   /* name unused for STUN */
+    }
 }

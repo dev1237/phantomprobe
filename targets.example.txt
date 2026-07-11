@@ -1,10 +1,23 @@
-# phantomprobe target list — one "ip  trigger_domain" per line.
+# phantomprobe target list — one "ip  trigger" per line.
 # Lines starting with '#' are comments. Copy to targets.txt and edit for your vantage.
 #
-#   <destination IP>   <trigger/blacklisted domain to test on the path to that IP>
+#   <destination IP>   <trigger>
 #
-# The examples below are UAE (Etisalat) destinations with a known-censored domain,
-# used in the original study. Replace with your own country's targets.
+# The 'trigger' column depends on --protocol:
+#   http / https : the blacklisted DOMAIN to test on the path (Host: header / TLS SNI)
+#   dns          : the censored QNAME to query (A record)
+#   stun         : ignored (trigger is a TURN Allocate packet) — use any placeholder
+#
+# The examples below use UAE (Etisalat) destinations + a known-censored name, as in the
+# original study. Replace with your own country's targets and vantage.
+
+# --- http / https (tcp) ---
 195.229.213.67   alhudood.net
 195.229.213.81   alhudood.net
 83.111.118.217   alhudood.net
+
+# --- dns (udp/53): point at resolvers on the path; trigger is the censored qname ---
+# 8.8.8.8        alhudood.net
+
+# --- stun (udp/3478): point at TURN relay servers; trigger is a placeholder ---
+# 203.0.113.10   allocate

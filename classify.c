@@ -6,24 +6,26 @@
 #include <unistd.h>
 #include "phantomprobe.h"
 
-typedef outcome_t (*probe_fn)(const char *, const char *, double);
+/* probe helpers: trigger call sets is_trigger=1 (matters only for STUN Allocate-vs-Binding). */
+#define PT(name)  proto_probe(proto, ip, (name), 1, to)   /* trigger  */
+#define PC(name)  proto_probe(proto, ip, (name), 0, to)   /* control  */
 
 /* stage 2: residual filtering, only called for a CENSORED target. */
 static void rf_test(const char *ip, const char *trig, const char *ctrl,
-                    probe_fn probe, double to, char *out, int cap) {
+                    proto_t proto, double to, char *out, int cap) {
     /* re-baseline: benign must be spotless right now, else RF is undecidable */
     int pre_block = 0;
-    for (int i = 0; i < 4; i++) if (is_block(probe(ip, ctrl, to))) pre_block++;
+    for (int i = 0; i < 4; i++) if (is_block(PC(ctrl))) pre_block++;
     if (pre_block > 0) { snprintf(out, cap, "RF-UNDECIDABLE(dirty-baseline)"); return; }
     /* fire trigger until it bites (max 15) */
     int bit = 0;
-    for (int i = 0; i < 15; i++) if (is_block(probe(ip, trig, to))) { bit = 1; break; }
+    for (int i = 0; i < 15; i++) if (is_block(PT(trig))) { bit = 1; break; }
     if (!bit) { snprintf(out, cap, "RF-INCONCLUSIVE(no-bite)"); return; }
     /* hammer benign, timestamped */
     double t0 = now_s(); double first_block = -1, recovered = -1; int streak = 0;
     for (int i = 0; i < 160; i++) {
         double t = now_s() - t0;
-        int blk = is_block(probe(ip, ctrl, to));
+        int blk = is_block(PC(ctrl));
         if (blk) { if (first_block < 0) first_block = t; streak = 0; }
         else {
             streak++;
@@ -39,16 +41,15 @@ static void rf_test(const char *ip, const char *trig, const char *ctrl,
 }
 
 void classify(const char *ip, const char *trig, const char *ctrl,
-              int is_https, int N, clsrow_t *row) {
+              proto_t proto, int N, clsrow_t *row) {
     memset(row, 0, sizeof *row);
-    probe_fn probe = is_https ? https_probe : http_probe;
-    double to = is_https ? 5.0 : 4.0;
+    double to = (proto == PROTO_HTTPS) ? 5.0 : (proto_is_udp(proto) ? 3.0 : 4.0);
     strcpy(row->strength, "-"); strcpy(row->mechanism, "-"); strcpy(row->rf, "-");
 
     /* P0 baseline */
     const int NB = 6; int base_allow = 0, base_block = 0;
     for (int i = 0; i < NB; i++) {
-        outcome_t o = probe(ip, ctrl, to);
+        outcome_t o = PC(ctrl);
         if (o == O_ALLOW) base_allow++;
         if (is_block(o)) base_block++;
     }
@@ -62,8 +63,8 @@ void classify(const char *ip, const char *trig, const char *ctrl,
     /* P1 differential */
     int c_block = 0, t_block = 0, c_rst = 0, t_rst = 0, t_bp = 0;
     for (int i = 0; i < N; i++) {
-        outcome_t oc = probe(ip, ctrl, to);
-        outcome_t ot = probe(ip, trig, to);
+        outcome_t oc = PC(ctrl);
+        outcome_t ot = PT(trig);
         if (is_block(oc)) c_block++;
         if (is_block(ot)) t_block++;
         if (is_inject(oc)) c_rst++;
@@ -101,5 +102,5 @@ void classify(const char *ip, const char *trig, const char *ctrl,
         strcpy(row->mechanism, "DROP(timeout)");
     }
     strcpy(row->verdict, "CENSORED");
-    rf_test(ip, trig, ctrl, probe, to, row->rf, sizeof row->rf);
+    rf_test(ip, trig, ctrl, proto, to, row->rf, sizeof row->rf);
 }

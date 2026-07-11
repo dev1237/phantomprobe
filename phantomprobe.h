@@ -7,9 +7,18 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* ---- channels the tool can probe ---- */
+typedef enum { PROTO_HTTP, PROTO_HTTPS, PROTO_DNS, PROTO_STUN } proto_t;
+const char *proto_name(proto_t p);   /* "http"|"https"|"dns"|"stun" */
+int  proto_port(proto_t p);          /* 80 | 443 | 53 | 3478         */
+int  proto_is_udp(proto_t p);        /* DNS and STUN are UDP         */
+int  proto_is_tcprst(proto_t p);     /* only HTTP/HTTPS get TCP-RST middlebox attribution (stages 3-7) */
+
 /* ---- trigger builders (exact byte-for-byte match of the Python reference) ---- */
 int build_client_hello(const char *sni, unsigned char *out, int cap);
 int build_http_get(const char *host, unsigned char *out, int cap);
+int build_dns_query(const char *qname, unsigned char *out, int cap);   /* A/IN query, RD=1 */
+int build_stun(int allocate, unsigned char *out, int cap);             /* 1=Allocate(TURN), 0=Binding */
 
 /* ---- normalized probe outcomes ---- */
 typedef enum { O_ALLOW, O_RST, O_TIMEOUT, O_REFUSED, O_BLOCKPAGE, O_EMPTY, O_ERR } outcome_t;
@@ -20,6 +29,12 @@ int is_inject(outcome_t o);   /* RST | BLOCKPAGE            (cannot be mere loss
 /* ---- stage 1-2: normal-socket probes + classifier ---- */
 outcome_t https_probe(const char *ip, const char *sni, double timeout);
 outcome_t http_probe (const char *ip, const char *host, double timeout);
+outcome_t dns_probe  (const char *ip, const char *qname, double timeout);
+outcome_t stun_probe (const char *ip, int allocate, double timeout);   /* allocate=1 trigger, 0 control */
+
+/* unified dispatcher: is_trigger selects Allocate vs Binding for STUN; for the other
+ * channels the name string itself carries trigger-vs-control, so is_trigger is ignored. */
+outcome_t proto_probe(proto_t p, const char *ip, const char *name, int is_trigger, double timeout);
 
 /* real TCP connect, set IP_TTL, send payload (the TTL-limited trigger on a genuine
  * connection -- what actually makes the injector fire). Injected RST/ICMP are read
@@ -43,7 +58,7 @@ typedef struct {
 } clsrow_t;
 
 void classify(const char *ip, const char *trig, const char *ctrl,
-              int is_https, int N, clsrow_t *row);
+              proto_t proto, int N, clsrow_t *row);
 
 /* small shared util */
 double now_s(void);

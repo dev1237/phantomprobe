@@ -78,22 +78,30 @@ static int verify_run(const char *base, const char *mba) {
 }
 
 int main(int argc, char **argv) {
-    const char *tfile = NULL, *country = "UAE"; int is_https = 1, N = 8, maxttl = 20, secs = 20;
+    const char *tfile = NULL, *country = "UAE"; proto_t proto_e = PROTO_HTTPS; int N = 8, maxttl = 20, secs = 20;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--targets") && i + 1 < argc) tfile = argv[++i];
-        else if (!strcmp(argv[i], "--protocol") && i + 1 < argc) is_https = strcmp(argv[++i], "http") != 0;
+        else if (!strcmp(argv[i], "--protocol") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if      (!strcmp(v, "http"))  proto_e = PROTO_HTTP;
+            else if (!strcmp(v, "https")) proto_e = PROTO_HTTPS;
+            else if (!strcmp(v, "dns"))   proto_e = PROTO_DNS;
+            else if (!strcmp(v, "stun"))  proto_e = PROTO_STUN;
+            else { fprintf(stderr, "unknown --protocol '%s' (use http|https|dns|stun)\n", v); return 2; }
+        }
         else if (!strcmp(argv[i], "--country") && i + 1 < argc) country = argv[++i];
         else if (!strcmp(argv[i], "--N") && i + 1 < argc) N = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--maxttl") && i + 1 < argc) maxttl = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--secs") && i + 1 < argc) secs = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--help")) { printf("usage: phantomprobe --targets FILE [--protocol http|https] [--country LABEL] [--N n] [--maxttl t] [--secs s]\n  --country LABEL is only an output-folder tag; it does not restrict targets. The tool works from/for any country.\n"); return 0; }
+        else if (!strcmp(argv[i], "--help")) { printf("usage: phantomprobe --targets FILE [--protocol http|https|dns|stun] [--country LABEL] [--N n] [--maxttl t] [--secs s]\n  http/https: censorship + residual filtering + full TCP-RST middlebox attribution (stages 1-7).\n  dns/stun:   censorship + residual filtering (stages 1-2); UDP channels have no TCP-RST layer to localize.\n  --country LABEL is only an output-folder tag; it does not restrict targets. The tool works from/for any country.\n"); return 0; }
     }
     if (!tfile) { fprintf(stderr, "need --targets FILE (see --help)\n"); return 2; }
     srand((unsigned)time(NULL) ^ getpid());
     static target_t T[MAXT];
     int nt = load_targets(tfile, T, MAXT);
     if (nt <= 0) { fprintf(stderr, "no targets\n"); return 2; }
-    const char *proto = is_https ? "https" : "http"; int dport = is_https ? 443 : 80;
+    int is_https = (proto_e == PROTO_HTTPS);
+    const char *proto = proto_name(proto_e); int dport = proto_port(proto_e);
 
     char stamp[32]; time_t tt = time(NULL); struct tm g; gmtime_r(&tt, &g);
     strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%SZ", &g);
@@ -131,7 +139,7 @@ int main(int argc, char **argv) {
     printf("[*] %d targets, protocol=%s, country=%s, raw_stages=%s\n", nt, proto, country, can_raw ? "on" : "off");
     for (int i = 0; i < nt; i++) {
         int sport = 1025 + rand() % 63000;   /* PARIS: fixed for every stage of this target */
-        clsrow_t r; classify(T[i].ip, T[i].trig, "example.com", is_https, N, &r);
+        clsrow_t r; classify(T[i].ip, T[i].trig, "example.com", proto_e, N, &r);
         fprintf(fc, "%s,%s,%d,%s,%s,%s,%.2f,%d,%s\n", T[i].ip, proto, sport, r.verdict, r.strength, r.mechanism, r.trig_rate, r.base_allow, r.note);
         char dur[16] = ""; const char *w = strstr(r.rf, "W="); if (w) snprintf(dur, sizeof dur, "%.1f", atof(w + 2));
         fprintf(fr, "%s,%s,%d,%s,%s,%s\n", T[i].ip, proto, sport, r.verdict, r.rf, dur);
@@ -139,6 +147,10 @@ int main(int argc, char **argv) {
         printf("  [%3d/%3d] %-18s %-11s %-14s %-14s rf=%s\n", i + 1, nt, T[i].ip, r.verdict, r.strength, r.mechanism, r.rf);
         if (!censored) continue;
         n_cen++;
+        if (!proto_is_tcprst(proto_e)) {   /* DNS/STUN are UDP: no injected TCP RST to localize */
+            fprintf(fl, "%s,%s,%d,,,,\"UDP channel: TCP-RST middlebox attribution (stages 3-7) N/A\"\n", T[i].ip, proto, sport);
+            continue;
+        }
         if (!can_raw) { fprintf(fl, "%s,%s,%d,,,,\"needs root for stages 3-7\"\n", T[i].ip, proto, sport); continue; }
 
         uint32_t tgt_be = inet_addr(T[i].ip); uint32_t src_be = local_ip_for(tgt_be);
