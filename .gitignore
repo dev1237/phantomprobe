@@ -1,0 +1,24 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dSYM/
+
+# Compiled binaries (built from source via `make`)
+/phantomprobe
+/geneva_test
+/diag
+
+# Measurement run output (generated at runtime; not part of the tool)
+outputs_pipeline/
+
+# Personal / scratch target lists (users bring their own; sample is targets.example.txt)
+targets.txt
+tg_*.txt
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/

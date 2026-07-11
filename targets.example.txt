@@ -1,0 +1,10 @@
+# phantomprobe target list — one "ip  trigger_domain" per line.
+# Lines starting with '#' are comments. Copy to targets.txt and edit for your vantage.
+#
+#   <destination IP>   <trigger/blacklisted domain to test on the path to that IP>
+#
+# The examples below are UAE (Etisalat) destinations with a known-censored domain,
+# used in the original study. Replace with your own country's targets.
+195.229.213.67   alhudood.net
+195.229.213.81   alhudood.net
+83.111.118.217   alhudood.net
