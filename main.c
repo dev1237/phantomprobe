@@ -86,7 +86,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--N") && i + 1 < argc) N = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--maxttl") && i + 1 < argc) maxttl = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--secs") && i + 1 < argc) secs = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--help")) { printf("usage: phantomprobe --targets FILE [--protocol http|https] [--country CC] [--N n] [--maxttl t] [--secs s]\n"); return 0; }
+        else if (!strcmp(argv[i], "--help")) { printf("usage: phantomprobe --targets FILE [--protocol http|https] [--country LABEL] [--N n] [--maxttl t] [--secs s]\n  --country LABEL is only an output-folder tag; it does not restrict targets. The tool works from/for any country.\n"); return 0; }
     }
     if (!tfile) { fprintf(stderr, "need --targets FILE (see --help)\n"); return 2; }
     srand((unsigned)time(NULL) ^ getpid());

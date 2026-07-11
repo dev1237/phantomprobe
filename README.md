@@ -17,25 +17,56 @@ make
 Produces the `phantomprobe` binary. Builds with gcc or clang, `-std=c11`, POSIX
 (Linux / macOS / BSD).
 
-## Run
+## Usage
+
+```
+phantomprobe --targets FILE [--protocol http|https] [--country LABEL]
+             [--N n] [--maxttl t] [--secs s] [--help]
+```
+
+**This tool is not country-specific.** It probes whatever destinations you list, from
+wherever you run it. Point it at any target list, from any vantage in the world.
+
+### Flags
+
+| Flag | Argument | Default | Meaning |
+|------|----------|---------|---------|
+| `--targets` | `FILE` | *(required)* | Target list: one `ip  trigger_domain` per line (see below). |
+| `--protocol` | `http` \| `https` | `https` | Which channel to trigger on: HTTP `Host:` header, or HTTPS TLS `SNI`. |
+| `--country` | `LABEL` | `UAE` | **Just a label** — a free-form tag stamped into the output folder name and `manifest.json`. It does **not** restrict or filter targets in any way; it's only for organising your runs. Use any string: `US`, `IR`, `mytest`, etc. |
+| `--N` | `n` | `8` | Number of differential samples per target (censorship confirmation: trigger vs. benign control). Higher = more robust against loss. |
+| `--maxttl` | `t` | `20` | Max TTL / traceroute depth for the injector-localization stage. |
+| `--secs` | `s` | `20` | Duration (seconds) of the dense IP-ID capture used to count injecting boxes. |
+| `--help` | — | — | Print usage and exit. |
+
+Anything except `http` passed to `--protocol` is treated as `https`.
+
+### Examples
 
 ```sh
-# stages 1-2 only (censored? + residual filtering) -- no root needed, fully portable:
-./phantomprobe --targets targets.txt --protocol https --country UAE
+# Stages 1-2 only (censored? + residual filtering) -- no root needed, fully portable:
+./phantomprobe --targets targets.txt --protocol https
 
-# full pipeline (all 7 stages need raw sockets + libpcap):
-sudo ./phantomprobe --targets targets.txt --protocol https --country UAE --N 8 --maxttl 20 --secs 20
+# Full pipeline (all stages -- needs raw sockets + libpcap, hence sudo):
+sudo ./phantomprobe --targets targets.txt --protocol https --N 8 --maxttl 20 --secs 20
+
+# A different country -- the --country label just names the output folder:
+sudo ./phantomprobe --targets iran_targets.txt --protocol http --country IR
+
+# HTTP channel, quick low-sample smoke test:
+./phantomprobe --targets targets.txt --protocol http --N 4
 ```
 
-`targets.txt` is one `ip trigger_domain` per line, e.g.
+### Target file format
+
+One `ip  trigger_domain` per line (whitespace-separated). Lines starting with `#` are
+comments. See [`targets.example.txt`](targets.example.txt).
 
 ```
-195.229.213.67  alhudood.net
-83.111.118.217  alhudood.net
+# <destination IP>   <trigger/blacklisted domain to test on the path to that IP>
+195.229.213.67   alhudood.net
+83.111.118.217   alhudood.net
 ```
-
-Flags: `--protocol http|https`, `--country CC`, `--N` differential samples,
-`--maxttl` traceroute depth, `--secs` dense IP-ID capture seconds.
 
 ## The ordered pipeline (per target, one session, one fixed source port)
 
