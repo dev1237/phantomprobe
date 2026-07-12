@@ -84,6 +84,10 @@ middleboxes, a per-modification-type breakdown, and how many targets were affect
 bash tcpsyn-results.sh dev-tcp-80.yrp
 ```
 
+The full saved report for the UAE reference scan is committed here:
+[`dev-tcp-80.results.txt`](dev-tcp-80.results.txt) (produced by running this exact script over
+`dev-tcp-80.yrp`). An excerpt:
+
 **Reference output** (from the UAE `dev-tcp-80.yrp`, 16 GB, ~41.7 M hops):
 
 ```
