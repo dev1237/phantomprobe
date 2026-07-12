@@ -103,6 +103,43 @@ See [`targets.example.txt`](targets.example.txt). The `trigger` column depends o
 83.111.118.217   alhudood.net
 ```
 
+### Building a target list
+
+You need two ingredients: a set of **destination IPs** in the country you're testing, and a
+**trigger** (a domain the country is suspected to block). Then pair them.
+
+**1. Destination IPs.** A few common sources:
+- **Country IP prefixes** from a Regional Internet Registry / GeoIP, e.g. RIPEstat
+  (`https://stat.ripe.net/data/country-resource-list/data.json?resource=AE`) or any free
+  per-country CIDR list. Expand the CIDRs to addresses with a tool like `prips` or `nmap -sL`.
+- **Live hosts only** (recommended — most addresses don't answer): scan the prefixes on the
+  relevant port with [ZMap](https://github.com/zmap/zmap), e.g.
+  `zmap -p 443 -o live.txt 2.0.0.0/8` — its output is one IP per line, ready to pair.
+- Targeting **on-path** censorship specifically? Prefer IPs whose path already crosses a
+  packet-modifying middlebox (a topology scan such as yarrp/yarrpbox surfaces these); censorship
+  concentrates there. (This prefilter is what the original UAE study used.)
+
+**2. Trigger domains.** Use a country's likely-blocked list, e.g. the
+[Citizen Lab test lists](https://github.com/citizenlab/test-lists) (`lists/<cc>.csv`, one URL per
+line — take the hostnames).
+
+**3. Pair them** with the bundled helper [`scripts/make_targets.sh`](scripts/make_targets.sh)
+(portable POSIX shell, no dependencies):
+
+```sh
+# one trigger applied to every live IP:
+scripts/make_targets.sh live.txt alhudood.net > targets.txt
+
+# or the full cross-product of IPs x a domains file:
+scripts/make_targets.sh live.txt domains.txt --each > targets.txt
+
+# for STUN the trigger is ignored -- any placeholder works:
+scripts/make_targets.sh turn_servers.txt allocate > stun_targets.txt
+```
+
+It validates IPv4, skips comments/blanks, and writes the `IP<TAB>trigger` format
+`phantomprobe` expects. Then just `./phantomprobe --targets targets.txt --protocol https`.
+
 ## The ordered pipeline (per target, one session, one fixed source port)
 
 Stages **1–2 run on every channel** (http/https/dns/stun). Stages **3–7 run only on the TCP
