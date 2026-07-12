@@ -138,7 +138,24 @@ scripts/make_targets.sh turn_servers.txt allocate > stun_targets.txt
 ```
 
 It validates IPv4, skips comments/blanks, and writes the `IP<TAB>trigger` format
-`phantomprobe` expects. Then just `./phantomprobe --targets targets.txt --protocol https`.
+`phantomprobe` expects.
+
+**Putting it together (end to end).** `live.txt` is just the name you gave ZMap's output —
+a plain list of live IPs, one per line:
+
+```sh
+# 1. live hosts in the country's prefixes, on your port -> live.txt (one IP per line)
+zmap -p 443 -o live.txt 2.0.0.0/8
+
+# 2. pair each live IP with the trigger domain -> targets.txt
+scripts/make_targets.sh live.txt alhudood.net > targets.txt
+
+# 3. run the tool on that list
+./phantomprobe --targets targets.txt --protocol https
+```
+
+So the chain is: **`live.txt` (your IPs, e.g. ZMap output) + a trigger → `make_targets.sh`
+→ `targets.txt` → `phantomprobe`.**
 
 ## The ordered pipeline (per target, one session, one fixed source port)
 
