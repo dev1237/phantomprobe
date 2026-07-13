@@ -7,6 +7,18 @@ problem caused by BGP/ECMP churn).
 
 Download, build, run — anywhere. One dependency (libpcap), and only for the raw stages.
 
+## Download
+
+Grab the whole codebase as a zip — three ways:
+
+- **Latest release (recommended):** the [Releases page](https://github.com/dev1237/phantomprobe/releases/latest)
+  has a versioned `phantomprobe-<version>.zip` plus GitHub's auto `Source code (zip)`.
+- **Latest `main` directly:**
+  [`phantomprobe-main.zip`](https://github.com/dev1237/phantomprobe/archive/refs/heads/main.zip)
+- **From the GitHub UI:** the green **`< > Code`** button ▸ **Download ZIP**.
+
+Or clone it: `git clone https://github.com/dev1237/phantomprobe.git`
+
 ## Build
 
 ```sh
