@@ -142,7 +142,8 @@ int stage_backup(int rawfd, cap_t *cap, uint32_t tgt_be, int dport, uint32_t src
 
 /* ---------------- stage 5/7: IP-ID same-box (router == injector?) ---------------- */
 int stage_samebox(int rawfd, cap_t *cap, uint32_t tgt_be, int dport, uint16_t sport, uint32_t src_be,
-                  const char *router_ip, int ttl, const uint8_t *ch, int chlen, int secs, samebox_t *out) {
+                  const char *router_ip, int ttl, const uint8_t *ch, int chlen, int secs,
+                  const char *dump_path, samebox_t *out) {
     memset(out, 0, sizeof *out);
     snprintf(out->router_ip, sizeof out->router_ip, "%s", router_ip);
     out->ttl = ttl;
@@ -167,6 +168,7 @@ int stage_samebox(int rawfd, cap_t *cap, uint32_t tgt_be, int dport, uint16_t sp
     out->router_span = rmax - rmin;
     /* interpolate router counter at each reset time (bracket within 0.2s); diff = reset - router */
     int *raw = malloc(nr * sizeof(int)); double *rawt = malloc(nr * sizeof(double)); int nraw = 0;
+    int *raw_rid = malloc(nr * sizeof(int)); int *raw_rint = malloc(nr * sizeof(int));  /* reset IP-ID + interp router */
     for (int i = 0; i < nr; i++) {
         double tr = rs[i].ts; int bi = -1, ai = -1;
         for (int j = 0; j < nR; j++) { if (rt[j] <= tr) bi = j; else { ai = j; break; } }
@@ -174,7 +176,8 @@ int stage_samebox(int rawfd, cap_t *cap, uint32_t tgt_be, int dport, uint16_t sp
         if (tr - rt[bi] > 0.20 || rt[ai] - tr > 0.20) continue;
         double dtt = rt[ai] - rt[bi]; int step = (rv[ai] - rv[bi]) & 0xffff; if (step > 32768) step -= 65536;
         int v = ((int)(rv[bi] + step * (tr - rt[bi]) / (dtt > 0 ? dtt : 1)) % 65536 + 65536) % 65536;
-        raw[nraw] = (((int)rs[i].id - v) % 65536 + 65536) % 65536; rawt[nraw] = tr; nraw++;
+        raw[nraw] = (((int)rs[i].id - v) % 65536 + 65536) % 65536; rawt[nraw] = tr;
+        raw_rid[nraw] = rs[i].id; raw_rint[nraw] = v; nraw++;
     }
     if (nraw < 8) { snprintf(out->verdict, sizeof out->verdict, "INCONCLUSIVE (too few bracketed resets)"); goto done; }
     double chance = nraw * (1001.0 / 65536.0);
@@ -193,7 +196,140 @@ int stage_samebox(int rawfd, cap_t *cap, uint32_t tgt_be, int dport, uint16_t sp
         else if (aligned) snprintf(out->verdict, sizeof out->verdict, "SEPARATE (offset drifts %s => two counters)", out->thirds);
         else snprintf(out->verdict, sizeof out->verdict, "SEPARATE (no offset aligns; best ~chance)");
     }
+    if (dump_path) {   /* persist the raw IP-ID evidence for audit/visualisation */
+        FILE *df = fopen(dump_path, "w");
+        if (df) {
+            fprintf(df, "# router=%s ttl=%d best_offset=%d router_samples=%d reset_samples=%d matches=%d verdict=\"%s\"\n",
+                    router_ip, ttl, best_o, nR, nr, best_c, out->verdict);
+            fprintf(df, "kind,ts,ipid,router_interp,offset,match\n");
+            for (int i = 0; i < nR; i++) fprintf(df, "router,%.6f,%d,,,\n", rt[i], rv[i]);       /* control counter */
+            for (int i = 0; i < nraw; i++) {                                                     /* injected resets  */
+                int m = cdist(raw[i], best_o) <= 500;
+                fprintf(df, "reset,%.6f,%d,%d,%d,%d\n", rawt[i], raw_rid[i], raw_rint[i], raw[i], m);
+            }
+            fclose(df);
+        }
+    }
 done:
-    free(raw); free(rawt); free(rt); free(rv);
+    free(raw); free(rawt); free(raw_rid); free(raw_rint); free(rt); free(rv);
+    return 1;
+}
+
+/* ---------------- UDP localization (DNS/STUN): mechanism-agnostic ----------------
+ * Don't assume "UDP == silent drop". A UDP censor may:
+ *   - DROP the forbidden datagram silently,
+ *   - INJECT a forged UDP response (spoofed src == target), or
+ *   - INJECT an ICMP dest-unreachable (the UDP analog of a TCP RST),
+ *   - or drop AND inject.
+ * If ANYTHING is injected it carries a TTL + IP-ID, so onset localization and the
+ * IP-ID same-box / count-injectors analysis all come back (STUNTrace / DNS-trace
+ * lineage). For a pure drop we localize the drop hop by absence: the hop where the
+ * BENIGN control still elicits ICMP time-exceeded but the FORBIDDEN no longer does. */
+static int udp_reached(cap_t *cap, uint32_t tgt_be) {   /* did the TTL-probe reach its expiry hop? */
+    icmp_ev *ic; int n = cap_icmps(cap, &ic);
+    for (int i = 0; i < n; i++) if (ic[i].inner_dst == tgt_be) return 1;
+    return 0;
+}
+int stage_udp_locate(int rawfd, cap_t *cap, uint32_t tgt_be, const char *tgt_ip,
+                     int dport, uint16_t sport, uint32_t src_be,
+                     const uint8_t *forb, int flen, const uint8_t *ben, int blen,
+                     int maxttl, udploc_t *out) {
+    (void)tgt_ip;
+    memset(out, 0, sizeof *out);
+    strcpy(out->mechanism, "UNKNOWN"); strcpy(out->inj_verdict, "-");
+
+    /* Phase A: UDP traceroute (forbidden probe) -> route[ttl] via ICMP time-exceeded. */
+    for (int ttl = 1; ttl <= maxttl && ttl < 40; ttl++) {
+        cap_reset(cap);
+        for (int k = 0; k < 2; k++) send_udp(rawfd, src_be, tgt_be, sport, dport, ttl, forb, flen);
+        msleep(220);
+        icmp_ev *ic; int ni = cap_icmps(cap, &ic);
+        for (int i = 0; i < ni; i++) if (ic[i].inner_dst == tgt_be) {
+            struct in_addr a; a.s_addr = ic[i].rtr; snprintf(out->route[ttl], 32, "%s", inet_ntoa(a)); break;
+        }
+        if (out->route[ttl][0]) out->path_len = ttl;
+    }
+
+    /* Phase B: mechanism -- does the forbidden draw an injected reply the benign doesn't? */
+    int f_inj = 0, f_kind0 = 0, f_kind1 = 0, b_inj = 0;
+    for (int r = 0; r < 4; r++) {
+        cap_reset(cap);
+        for (int k = 0; k < 2; k++) send_udp(rawfd, src_be, tgt_be, sport, dport, 64, forb, flen);
+        msleep(400);
+        inj_ev *ij; int nj = cap_injs(cap, &ij);
+        for (int i = 0; i < nj; i++) { f_inj++; if (ij[i].kind == 0) f_kind0++; else f_kind1++; }
+    }
+    for (int r = 0; r < 3; r++) {
+        cap_reset(cap);
+        for (int k = 0; k < 2; k++) send_udp(rawfd, src_be, tgt_be, sport, dport, 64, ben, blen);
+        msleep(400);
+        inj_ev *ij; int nj = cap_injs(cap, &ij); b_inj += nj;
+    }
+    int injected = (f_inj >= 2 && f_inj > b_inj);   /* forbidden injects, benign essentially doesn't */
+    if (injected)
+        strcpy(out->mechanism, (f_kind0 && f_kind1) ? "RESPONSE+ICMP-INJECT" :
+                               f_kind0 ? "RESPONSE-INJECT" : "ICMP-UNREACH-INJECT");
+    else strcpy(out->mechanism, "DROP");
+
+    if (injected) {
+        /* onset: smallest TTL at which the injected reply first appears */
+        int mirror_hits = 0, mirror_tot = 0;
+        for (int ttl = 1; ttl <= maxttl && ttl < 40; ttl++) {
+            cap_reset(cap);
+            for (int k = 0; k < 2; k++) send_udp(rawfd, src_be, tgt_be, sport, dport, ttl, forb, flen);
+            msleep(300);
+            inj_ev *ij; int nj = cap_injs(cap, &ij);
+            if (nj >= 1) {
+                if (!out->onset) out->onset = ttl;
+                for (int i = 0; i < nj; i++) { mirror_tot++; if (ij[i].ttl == ttl || ij[i].ttl == ttl + 1) mirror_hits++; }
+                break;
+            }
+        }
+        if (out->onset) {
+            int h = (out->onset - 1 >= 1 && out->route[out->onset - 1][0]) ? out->onset - 1 : out->onset;
+            snprintf(out->onset_router, sizeof out->onset_router, "%s", out->route[h]);
+        }
+        if (mirror_tot && mirror_hits >= 0.8 * mirror_tot) {
+            out->ttl_mirrored = 1;
+            snprintf(out->note, sizeof out->note, "injector mirrors probe TTL -- onset hop unreliable (cf. GFW)");
+        }
+        /* IP-ID same-box / count injectors: dense burst, separate the counters */
+        cap_reset(cap);
+        for (int k = 0; k < 150; k++) { send_udp(rawfd, src_be, tgt_be, 1025 + rand() % 63000, dport, 64, forb, flen); msleep(10); }
+        msleep(800);
+        inj_ev *ij; int nj = cap_injs(cap, &ij);
+        out->inj_samples = nj;
+        if (nj >= 8) {
+            uint16_t *ids = malloc(nj * sizeof(uint16_t));
+            for (int i = 0; i < nj; i++) ids[i] = ij[i].id;
+            int sizes[16]; int nk = sep_tracks(ids, nj, 12000, sizes, 16);
+            out->inj_tracks = nk;
+            int s0 = 0, s1 = 0;
+            for (int i = 0; i < nk; i++) { if (sizes[i] > s0) { s1 = s0; s0 = sizes[i]; } else if (sizes[i] > s1) s1 = sizes[i]; }
+            if (nk <= 1) strcpy(out->inj_verdict, "SINGLE injector (one IP-ID counter)");
+            else if (nk >= 2 && s1 >= 0.25 * nj) snprintf(out->inj_verdict, sizeof out->inj_verdict, "MULTIPLE injectors (%d IP-ID counters)", nk);
+            else strcpy(out->inj_verdict, "BORDERLINE (rerun denser)");
+            free(ids);
+        } else strcpy(out->inj_verdict, "too-few-injected (IP-ID inconclusive)");
+    } else {
+        /* pure DROP: drop-hop by absence (STUNTrace / DNS-trace) -- benign survives the hop,
+         * forbidden does not. Localizes the in-path drop to +-1 hop. */
+        int drop_hop = 0;
+        for (int ttl = 1; ttl <= maxttl && ttl < 40; ttl++) {
+            int f_reach = 0, b_reach = 0;
+            for (int r = 0; r < 2; r++) {
+                cap_reset(cap); for (int k = 0; k < 2; k++) send_udp(rawfd, src_be, tgt_be, sport, dport, ttl, forb, flen); msleep(260); if (udp_reached(cap, tgt_be)) f_reach++;
+                cap_reset(cap); for (int k = 0; k < 2; k++) send_udp(rawfd, src_be, tgt_be, sport, dport, ttl, ben,  blen); msleep(260); if (udp_reached(cap, tgt_be)) b_reach++;
+            }
+            if (b_reach >= 2 && f_reach == 0) { drop_hop = ttl; break; }
+        }
+        out->onset = drop_hop;
+        if (drop_hop) {
+            int h = (drop_hop - 1 >= 1 && out->route[drop_hop - 1][0]) ? drop_hop - 1 : drop_hop;
+            snprintf(out->onset_router, sizeof out->onset_router, "%s", out->route[h]);
+            snprintf(out->note, sizeof out->note, "drop-hop by STUNTrace/DNS-trace absence (in-path drop, +-1 hop)");
+        } else snprintf(out->note, sizeof out->note, "drop not localized (loss / ECMP, or benign also filtered)");
+        strcpy(out->inj_verdict, "N/A (pure drop -- no injected packet to fingerprint)");
+    }
     return 1;
 }

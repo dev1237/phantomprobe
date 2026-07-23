@@ -93,7 +93,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--N") && i + 1 < argc) N = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--maxttl") && i + 1 < argc) maxttl = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--secs") && i + 1 < argc) secs = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--help")) { printf("usage: phantomprobe --targets FILE [--protocol http|https|dns|stun] [--country LABEL] [--N n] [--maxttl t] [--secs s]\n  http/https: censorship + residual filtering + full TCP-RST middlebox attribution (stages 1-7).\n  dns/stun:   censorship + residual filtering (stages 1-2); UDP channels have no TCP-RST layer to localize.\n  --country LABEL is only an output-folder tag; it does not restrict targets. The tool works from/for any country.\n"); return 0; }
+        else if (!strcmp(argv[i], "--help")) { printf("usage: phantomprobe --targets FILE [--protocol http|https|dns|stun] [--country LABEL] [--N n] [--maxttl t] [--secs s]\n  http/https: censorship + residual filtering + full TCP-RST middlebox attribution (stages 1-7).\n  dns/stun:   censorship + residual filtering (stages 1-2) + mechanism-agnostic UDP localization:\n              injected reply (forged UDP/ICMP-unreach) => onset + IP-ID same-box/count;\n              pure drop => drop-hop by STUNTrace/DNS-trace absence.\n  --country LABEL is only an output-folder tag; it does not restrict targets. The tool works from/for any country.\n"); return 0; }
     }
     if (!tfile) { fprintf(stderr, "need --targets FILE (see --help)\n"); return 2; }
     srand((unsigned)time(NULL) ^ getpid());
@@ -147,16 +147,26 @@ int main(int argc, char **argv) {
         printf("  [%3d/%3d] %-18s %-11s %-14s %-14s rf=%s\n", i + 1, nt, T[i].ip, r.verdict, r.strength, r.mechanism, r.rf);
         if (!censored) continue;
         n_cen++;
-        if (!proto_is_tcprst(proto_e)) {   /* DNS/STUN are UDP: no injected TCP RST to localize */
-            fprintf(fl, "%s,%s,%d,,,,\"UDP channel: TCP-RST middlebox attribution (stages 3-7) N/A\"\n", T[i].ip, proto, sport);
-            continue;
-        }
         if (!can_raw) { fprintf(fl, "%s,%s,%d,,,,\"needs root for stages 3-7\"\n", T[i].ip, proto, sport); continue; }
 
         uint32_t tgt_be = inet_addr(T[i].ip); uint32_t src_be = local_ip_for(tgt_be);
         if (!src_be) { fprintf(fl, "%s,%s,%d,,,,\"no route/src ip\"\n", T[i].ip, proto, sport); continue; }
         cap_t *cap = cap_start(dev, tgt_be);
         if (!cap) { fprintf(fl, "%s,%s,%d,,,,\"pcap open failed\"\n", T[i].ip, proto, sport); continue; }
+
+        if (proto_is_udp(proto_e)) {   /* DNS/STUN: mechanism-agnostic UDP localization (drop OR injected) */
+            unsigned char uf[1024], ubn[1024]; int uflen, ublen;
+            if (proto_e == PROTO_STUN) { uflen = build_stun(1, uf, sizeof uf); ublen = build_stun(0, ubn, sizeof ubn); }
+            else { uflen = build_dns_query(T[i].trig, uf, sizeof uf); ublen = build_dns_query("example.com", ubn, sizeof ubn); }
+            udploc_t ul; stage_udp_locate(rawfd, cap, tgt_be, T[i].ip, dport, sport, src_be, uf, uflen, ubn, ublen, maxttl, &ul);
+            fprintf(fl, "%s,%s,%d,%d,%s,%d,\"%s | %s | %s\"\n", T[i].ip, proto, sport, ul.onset, ul.onset_router, ul.path_len, ul.mechanism, ul.inj_verdict, ul.note);
+            if (ul.inj_samples > 0)
+                fprintf(fbk, "%s,%s,%d,%d,,%d,,\"%s%s\"\n", T[i].ip, proto, sport, ul.inj_samples, ul.inj_tracks, ul.inj_verdict, ul.ttl_mirrored ? " [TTL-mirrored]" : "");
+            if (!strcmp(ul.mechanism, "DROP") && ul.onset) n_in++;   /* a localized drop is in-path */
+            cap_stop(cap);
+            continue;
+        }
+
         unsigned char ch[1024], ben[1024];
         int chlen = is_https ? build_client_hello(T[i].trig, ch, sizeof ch) : build_http_get(T[i].trig, ch, sizeof ch);
         int blen  = is_https ? build_client_hello("example.com", ben, sizeof ben) : build_http_get("example.com", ben, sizeof ben);
@@ -174,11 +184,13 @@ int main(int argc, char **argv) {
 
         if (!strcmp(sv.verdict, "IN-PATH-DROP")) {
             n_in++;
-            samebox_t sb; stage_samebox(rawfd, cap, tgt_be, dport, sport, src_be, loc.onset_router, loc.onset, ch, chlen, secs, &sb);
+            char dpath[512]; snprintf(dpath, sizeof dpath, "%s/ipid_raw_%s_h%d.csv", mba, T[i].ip, loc.onset);
+            samebox_t sb; stage_samebox(rawfd, cap, tgt_be, dport, sport, src_be, loc.onset_router, loc.onset, ch, chlen, secs, dpath, &sb);
             fprintf(frvm, "%s,%s,%d,%s,%d,%d,%d,%d,%d,%s,%s,%s\n", T[i].ip, proto, sport, sb.router_ip, sb.ttl, sb.router_samples, sb.reset_samples, sb.router_span, sb.best_offset, sb.offset_hits, sb.thirds, sb.verdict);
             for (int up = loc.onset - 1; up >= loc.onset - 2 && up >= 1; up--) {
                 if (!loc.route[up][0] || is_private(loc.route[up])) continue;
-                samebox_t bbx; stage_samebox(rawfd, cap, tgt_be, dport, sport, src_be, loc.route[up], up, ch, chlen, secs, &bbx);
+                char dpb[512]; snprintf(dpb, sizeof dpb, "%s/ipid_raw_%s_bb_h%d.csv", mba, T[i].ip, up);
+                samebox_t bbx; stage_samebox(rawfd, cap, tgt_be, dport, sport, src_be, loc.route[up], up, ch, chlen, secs, dpb, &bbx);
                 fprintf(fbb, "%s,%s,%d,%d,%s,%d,%d,%d,%s,%s,%s\n", T[i].ip, proto, sport, up, bbx.router_ip, bbx.router_samples, bbx.reset_samples, bbx.best_offset, bbx.offset_hits, bbx.thirds, bbx.verdict);
             }
         }
